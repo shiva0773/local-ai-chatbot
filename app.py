@@ -1,121 +1,335 @@
 
-import streamlit as st
+from pathlib import Path
+import hashlib
+import io
+import sqlite3
+
+import chromadb
 import ollama
+import streamlit as st
+from docx import Document
+from pypdf import PdfReader
+
 import database
 
+# ---------------- Configuration ----------------
 MODEL = "qwen2.5-coder:3b"
+EMBEDDING_MODEL = "nomic-embed-text"
+COLLECTION_NAME = "documents"
 
+BASE_DIR = Path(__file__).parent
+DB_DIR = BASE_DIR / "chroma_db"
+
+SUPPORTED_TYPES = ["pdf", "txt", "md", "docx"]
+
+
+# ---------------- ChromaDB ----------------
+@st.cache_resource
+def get_collection():
+    client = chromadb.PersistentClient(path=str(DB_DIR))
+    return client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+
+def split_text(text, chunk_size=500, overlap=100):
+    text = " ".join(text.split())
+    if not text:
+        return []
+
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunks.append(text[start:end])
+
+        if end == len(text):
+            break
+
+        start = end - overlap
+
+    return chunks
+
+
+# ---------------- Document extraction ----------------
+def extract_document(uploaded_file):
+    name = uploaded_file.name
+    suffix = Path(name).suffix.lower()
+    raw_bytes = uploaded_file.getvalue()
+
+    if suffix == ".pdf":
+        reader = PdfReader(io.BytesIO(raw_bytes))
+        pages = []
+
+        for page_number, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            if text.strip():
+                pages.append((page_number, text))
+
+        return pages
+
+    if suffix in [".txt", ".md"]:
+        text = raw_bytes.decode("utf-8-sig", errors="replace")
+        return [(1, text)] if text.strip() else []
+
+    if suffix == ".docx":
+        doc = Document(io.BytesIO(raw_bytes))
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+
+        for table in doc.tables:
+            for row in table.rows:
+                parts.append(" | ".join(cell.text for cell in row.cells))
+
+        text = "\n".join(parts)
+        return [(1, text)] if text.strip() else []
+
+    raise ValueError(f"Unsupported file type: {suffix}")
+
+
+# ---------------- Index documents ----------------
+def index_document(uploaded_file):
+    collection = get_collection()
+    source_name = Path(uploaded_file.name).name
+    raw_bytes = uploaded_file.getvalue()
+    file_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+    try:
+        pages = extract_document(uploaded_file)
+    except Exception as exc:
+        return False, f"Could not read {source_name}: {exc}"
+
+    documents = []
+    metadatas = []
+    ids = []
+
+    for page_number, page_text in pages:
+        chunks = split_text(page_text)
+
+        for chunk_number, chunk in enumerate(chunks, start=1):
+            chunk_id = (
+                f"{file_hash[:16]}_p{page_number}_c{chunk_number}"
+            )
+
+            documents.append(chunk)
+            metadatas.append({
+                "source": source_name,
+                "page": page_number,
+                "chunk": chunk_number,
+                "file_hash": file_hash,
+            })
+            ids.append(chunk_id)
+
+    if not documents:
+        return False, f"No extractable text found in {source_name}."
+
+    try:
+        embeddings = []
+
+        for chunk in documents:
+            response = ollama.embeddings(
+                model=EMBEDDING_MODEL,
+                prompt=chunk,
+            )
+            embeddings.append(response["embedding"])
+
+        # Remove an older indexed version of this same filename.
+        existing = collection.get(
+            where={"source": source_name},
+            include=["metadatas"],
+        )
+
+        if existing["ids"]:
+            collection.delete(ids=existing["ids"])
+
+        collection.upsert(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+        return True, f"Indexed {len(documents)} chunks from {source_name}."
+
+    except Exception as exc:
+        return False, f"Indexing failed for {source_name}: {exc}"
+
+
+# ---------------- Retrieval ----------------
+def retrieve_relevant_documents(question, top_k=3):
+    collection = get_collection()
+
+    if collection.count() == 0:
+        return []
+
+    response = ollama.embeddings(
+        model=EMBEDDING_MODEL,
+        prompt=question,
+    )
+
+    results = collection.query(
+        query_embeddings=[response["embedding"]],
+        n_results=min(top_k, collection.count()),
+        include=["documents", "metadatas", "distances"],
+    )
+
+    passages = []
+
+    for text, metadata, distance in zip(
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0],
+    ):
+        passages.append({
+            "text": text,
+            "source": metadata.get("source", "Unknown"),
+            "page": metadata.get("page", 1),
+            "distance": distance,
+        })
+
+    return passages
+
+
+# ---------------- Streamlit UI ----------------
 st.set_page_config(
-    page_title="Local AI Chatbot",
-    page_icon="🤖",
-    layout="centered",
+    page_title="Local AI Document Chat",
+    page_icon="📚",
+    layout="wide",
 )
 
-database.initialize_database()
+st.title("📚 Local AI Document Chat")
+st.caption("Ask questions about your own PDF, text, Markdown, and Word documents.")
 
-if "conversation_id" not in st.session_state:
-    st.session_state.conversation_id = None
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-
-def start_new_chat():
-    conversation_id = database.create_conversation()
-    st.session_state.conversation_id = conversation_id
-    st.session_state.messages = []
-
-
-def load_chat(conversation_id):
-    st.session_state.conversation_id = conversation_id
-    saved_messages = database.get_messages(conversation_id)
-    st.session_state.messages = [
-        {"role": message["role"], "content": message["content"]}
-        for message in saved_messages
-    ]
-
-
-st.title("🤖 Local AI Chatbot")
-st.caption("Powered by Ollama and SQLite")
-
+# Upload files directly from your computer.
 with st.sidebar:
-    st.header("Your chats")
+    st.header("📁 Add documents")
+
+    uploaded_files = st.file_uploader(
+        "Choose documents from your computer",
+        type=SUPPORTED_TYPES,
+        accept_multiple_files=True,
+        help="Supported: PDF, TXT, MD, DOCX",
+    )
+
+    if st.button(
+        "Index selected documents",
+        disabled=not uploaded_files,
+        use_container_width=True,
+    ):
+        for uploaded_file in uploaded_files:
+            with st.spinner(f"Indexing {uploaded_file.name}..."):
+                success, message = index_document(uploaded_file)
+
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+
+    collection = get_collection()
+    st.caption(f"Indexed chunks: {collection.count()}")
+
+    st.divider()
+    st.header("💬 Chat history")
 
     if st.button("➕ New chat", use_container_width=True):
-        start_new_chat()
+        st.session_state.pop("conversation_id", None)
         st.rerun()
 
+    # Keep compatibility with the existing database module.
     conversations = database.get_conversations()
 
     for conversation in conversations:
-        label = conversation["title"]
+        conversation_id = conversation['id']
+        title = conversation['title']
+
         if st.button(
-            label,
-            key=f"chat_{conversation['id']}",
+            title,
+            key=f"conversation_{conversation_id}",
             use_container_width=True,
         ):
-            load_chat(conversation["id"])
+            st.session_state["conversation_id"] = conversation_id
             st.rerun()
 
-    st.divider()
-    st.caption(f"Model: {MODEL}")
 
-# Display the selected conversation.
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-prompt = st.chat_input("Ask me anything...")
-
-if prompt:
-    if st.session_state.conversation_id is None:
-        start_new_chat()
-
-    conversation_id = st.session_state.conversation_id
-
-    # Save the user's message.
-    database.save_message(conversation_id, "user", prompt)
-    st.session_state.messages.append(
-        {"role": "user", "content": prompt}
+# Create a new conversation when needed.
+if "conversation_id" not in st.session_state:
+    st.session_state["conversation_id"] = database.create_conversation(
+        "New conversation"
     )
 
+conversation_id = st.session_state["conversation_id"]
+
+# Load saved messages.
+messages = database.get_messages(conversation_id)
+
+for message in messages:
+    role = message['role']
+    content = message['content']
+
+    with st.chat_message(role):
+        st.markdown(content)
+
+
+question = st.chat_input("Ask a question about your indexed documents...")
+
+if question:
+    database.save_message(conversation_id, "user", question)
+
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
+        try:
+            passages = retrieve_relevant_documents(question)
+
+            if not passages:
+                answer = (
+                    "No documents have been indexed yet. "
+                    "Upload one or more documents in the sidebar and "
+                    "click **Index selected documents**."
+                )
+            else:
+                context_parts = []
+
+                for passage in passages:
+                    context_parts.append(
+                        f"[Source: {passage['source']}, "
+                        f"Page: {passage['page']}]\n"
+                        f"{passage['text']}"
+                    )
+
+                context = "\n\n".join(context_parts)
+
                 response = ollama.chat(
                     model=MODEL,
-                    messages=st.session_state.messages,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Answer the user's question using only the "
+                                "provided document context. Cite claims using "
+                                "[Source: filename, Page: number]. If the "
+                                "context does not contain the answer, say "
+                                "that the indexed documents do not provide "
+                                "enough information. Do not invent facts."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Document context:\n{context}\n\n"
+                                f"Question: {question}"
+                            ),
+                        },
+                    ],
                 )
 
                 answer = response["message"]["content"]
-                st.markdown(answer)
 
-                database.save_message(
-                    conversation_id, "assistant", answer
-                )
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer}
-                )
+        except Exception as exc:
+            answer = f"An error occurred: {exc}"
 
-                # Name the conversation using its first question.
-                if len(st.session_state.messages) == 2:
-                    title = prompt.strip().replace("\n", " ")[:45]
-                    with database.get_connection() as connection:
-                        connection.execute(
-                            "UPDATE conversations SET title = ? WHERE id = ?",
-                            (title or "New conversation", conversation_id),
-                        )
+        st.markdown(answer)
 
-            except Exception as error:
-                st.error(
-                    "Could not connect to Ollama. "
-                    "Check that Ollama is running and the model is installed."
-                )
-                st.caption(f"Technical details: {error}")
-
-                # Remove the failed user message from the current UI history.
-                st.session_state.messages.pop()
-                st.rerun()
+    database.save_message(conversation_id, "assistant", answer)

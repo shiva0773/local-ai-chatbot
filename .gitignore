@@ -20,3 +20,15 @@ htmlcov/
 .DS_Store
 Thumbs.db
 chat_history.db
+
+# Local databases and generated vector index
+chat_history.db
+chroma_db/  
+
+# Local uploads and private documents
+documents/*
+!documents/.gitkeep
+
+# Test and tool caches
+.pytest_cache/
+.streamlit/secrets.toml
