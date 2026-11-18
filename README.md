@@ -123,20 +123,13 @@ After setting up on a new device, upload and index your documents again. Chat hi
 ```text
 local-ai-chatbot/
 ├── app.py
-├── chatbot.py
 ├── database.py
-├── document_loader.py
-├── embedding_demo.py
-├── ingest.py
-├── search_documents.py
-├── semantic_search.py
-├── test_database.py
-├── test_document_loader.py
 ├── requirements.txt
 ├── README.md
-├── documents/       # Local documents; not committed
+├── .gitignore
+├── documents/       # Local uploads; not committed
 ├── chroma_db/       # Generated vector index; not committed
-└── chat_history.db  # Local SQLite database; not committed
+└── chat_history.db  # Local chat history; not committed
 ```
 
 ## Troubleshooting
@@ -182,11 +175,12 @@ streamlit run app.py --server.port 8502
 
 - `app.py` — Streamlit chatbot interface and RAG workflow.
 - `database.py` — SQLite conversation and message persistence.
-- `document_loader.py` — document extraction and text chunking.
-- `ingest.py` — command-line document indexing.
-- `search_documents.py` — command-line semantic search.
-- `semantic_search.py` and `embedding_demo.py` — learning and experimentation.
-- `test_database.py` and `test_document_loader.py` — tests.
+- `requirements.txt` — Python packages required to run the app.
+
+The Git repository contains only the app and its required source files.
+The virtual environment, uploaded documents, chat history, and generated
+ChromaDB index stay local and must be set up or populated separately on
+another computer.
 
 ## License
 

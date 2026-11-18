@@ -1,34 +1,23 @@
 
-# Python virtual environment
+# Python environment and caches
 .venv/
-
-# Python cache
 __pycache__/
 *.py[cod]
-
-# Environment variables and secrets
-.env
-.env.*
-
-# Test and coverage files
 .pytest_cache/
 .coverage
 htmlcov/
 
-# IDE and OS files
+# Environment variables and secrets
+.env
+.env.*
+.streamlit/secrets.toml
+
+# IDE and operating system files
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local application data
 chat_history.db
-
-# Local databases and generated vector index
-chat_history.db
-chroma_db/  
-
-# Local uploads and private documents
-documents/*
-!documents/.gitkeep
-
-# Test and tool caches
-.pytest_cache/
-.streamlit/secrets.toml
+chroma_db/
+documents/

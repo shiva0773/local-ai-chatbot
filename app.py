@@ -2,7 +2,6 @@
 from pathlib import Path
 import hashlib
 import io
-import sqlite3
 
 import chromadb
 import ollama
@@ -215,7 +214,7 @@ with st.sidebar:
     if st.button(
         "Index selected documents",
         disabled=not uploaded_files,
-        use_container_width=True,
+        width="stretch",
     ):
         for uploaded_file in uploaded_files:
             with st.spinner(f"Indexing {uploaded_file.name}..."):
@@ -232,7 +231,7 @@ with st.sidebar:
     st.divider()
     st.header("💬 Chat history")
 
-    if st.button("➕ New chat", use_container_width=True):
+    if st.button("➕ New chat", width="stretch"):
         st.session_state.pop("conversation_id", None)
         st.rerun()
 
@@ -246,7 +245,7 @@ with st.sidebar:
         if st.button(
             title,
             key=f"conversation_{conversation_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state["conversation_id"] = conversation_id
             st.rerun()
